@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google 登入 + 多人視訊範例</title>
+    
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+    
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 10px;
+            margin-top: 20px;
+        }
+        video {
+            width: 100%;
+            background: #000;
+            border-radius: 8px;
+        }
+        .controls { margin: 20px 0; padding: 10px; background: #f0f0f0; border-radius: 8px;}
+        .hidden { display: none; }
+        #userInfo { color: blue; font-weight: bold; }
+        #myIdDisplay { font-weight: bold; color: #d32f2f; }
+    </style>
+</head>
+<body>
+
+    <h1>視訊會議 Demo</h1>
+
+    <div id="loginSection">
+        <button onclick="loginWithGoogle()">使用 Google 帳戶登入</button>
+    </div>
+
+    <div id="appSection" class="hidden">
+        <p>歡迎, <span id="userInfo"></span></p>
+        
+        <div class="controls">
+            <p>你的連線 ID: <span id="myIdDisplay">正在產生...</span> (分享給朋友來連線)</p>
+            <input type="text" id="remoteIdInput" placeholder="貼上對方的 ID">
+            <button onclick="callUser()">撥打視訊</button>
+        </div>
+
+        <div class="video-grid">
+            <div>
+                <p>我的畫面</p>
+                <video id="localVideo" autoplay playsinline muted></video>
+            </div>
+            <div id="remoteVideoContainer">
+                </div>
+        </div>
+    </div>
+
+<script>
+    // ==========================================
+    // 1. Firebase 設定 (請換成你自己的！)
+    // ==========================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyCTqHCcZRR0s0UqGsu5Oid9DVY7bawz6dU",
+      authDomain: "litnews-e5aa4.firebaseapp.com",
+      projectId: "litnews-e5aa4",
+      storageBucket: "litnews-e5aa4.firebasestorage.app",
+      messagingSenderId: "265413322210",
+      appId: "1:265413322210:web:1dd0d0a1443e4ea0b905bb",
+      measurementId: "G-XTK22HB3T3"
+    };
+
+    // 初始化 Firebase
+    try {
+        firebase.initializeApp(firebaseConfig);
+    } catch (e) {
+        console.error("Firebase 初始化失敗，請檢查設定", e);
+    }
+
+    // 變數宣告
+    let localStream;
+    let peer; 
+    const loginSection = document.getElementById('loginSection');
+    const appSection = document.getElementById('appSection');
+    const userInfo = document.getElementById('userInfo');
+    const myIdDisplay = document.getElementById('myIdDisplay');
+
+    // ==========================================
+    // 2. Google 登入邏輯
+    // ==========================================
+    function loginWithGoogle() {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        firebase.auth().signInWithPopup(provider)
+            .then((result) => {
+                const user = result.user;
+                handleLoginSuccess(user);
+            }).catch((error) => {
+                alert("登入失敗: " + error.message);
+            });
+    }
+
+    async function handleLoginSuccess(user) {
+        loginSection.classList.add('hidden');
+        appSection.classList.remove('hidden');
+        userInfo.innerText = user.displayName;
+
+        // 登入成功後，啟動攝影機與 PeerJS
+        await startLocalStream();
+        initPeerJS(user.uid); // 使用 Google UID 當作連線辨識的一部分(選用)
+    }
+
+    // ==========================================
+    // 3. 攝影機與麥克風邏輯
+    // ==========================================
+    async function startLocalStream() {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true
+            });
+            document.getElementById('localVideo').srcObject = localStream;
+        } catch (err) {
+            console.error("無法取得攝影機", err);
+            alert("請允許攝影機權限");
+        }
+    }
+
+    // ==========================================
+    // 4. PeerJS 多人連線核心邏輯
+    // ==========================================
+    function initPeerJS(userId) {
+        // 建立 Peer 物件，這裡我們使用 PeerJS 免費提供的雲端 Server
+        peer = new Peer(); 
+
+        // 當我連上 Peer Server，取得我的 ID
+        peer.on('open', (id) => {
+            myIdDisplay.innerText = id;
+            console.log('My peer ID is: ' + id);
+        });
+
+        // 當有人打給我 (接收端)
+        peer.on('call', (call) => {
+            // 1. 同意接聽，並回傳我的影像
+            call.answer(localStream); 
+            
+            // 2. 當收到對方的影像串流
+            call.on('stream', (remoteStream) => {
+                addRemoteVideo(remoteStream);
+            });
+        });
+    }
+
+    // 主動撥打給別人 (發送端)
+    function callUser() {
+        const remoteId = document.getElementById('remoteIdInput').value;
+        if (!remoteId) return alert("請輸入對方 ID");
+
+        // 1. 撥打給對方，並傳送我的影像
+        const call = peer.call(remoteId, localStream);
+
+        // 2. 當收到對方回傳的影像
+        call.on('stream', (remoteStream) => {
+            addRemoteVideo(remoteStream);
+        });
+    }
+
+    // 輔助：將對方的影像加入畫面
+    function addRemoteVideo(stream) {
+        // 避免重複加入 (簡單判斷)
+        if(document.getElementById(stream.id)) return;
+
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        video.id = stream.id; // 標記 ID
+        video.autoplay = true;
+        video.playsInline = true;
+        
+        const container = document.createElement('div');
+        container.innerHTML = "<p>對方畫面</p>";
+        container.appendChild(video);
+        
+        document.getElementById('remoteVideoContainer').appendChild(container);
+    }
+
+</script>
+
+</body>
+</html>
